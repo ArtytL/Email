@@ -54,7 +54,8 @@ export default async function handler(req, res) {
     const info = await transporter.sendMail({
       from: process.env.MAIL_FROM || process.env.SMTP_USER,
       to: process.env.TO_EMAIL,
-      subject: `[โล๊ะแผ่นมือ 2] ออร์เดอร์ใหม่ ${orderId}`,
+      replyTo: customer?.email ? { name: customer.name || "", address: customer.email } : undefined,
+      subject: `[โล๊ะแผ่นมือ 2] ออร์เดอร์ใหม่ ${orderId} (฿${fmt(total)})`,
       html,
       attachments,
     });
