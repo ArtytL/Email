@@ -13,6 +13,13 @@ export default async function handler(req, res) {
     if (!orderId || !items || !total || !customer?.name || !customer?.phone) {
       return withCORS(res).status(400).json({ ok: false, error: "Bad payload" });
     }
+// 👇 debug ENV ที่ runtime ใช้อยู่จริง
+console.log("SMTP check", {
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: process.env.SMTP_SECURE,
+  user: process.env.SMTP_USER,
+});
 
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
