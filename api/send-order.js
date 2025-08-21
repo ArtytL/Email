@@ -14,7 +14,7 @@ export default async function handler(req, res) {
       return withCORS(res).status(400).json({ ok: false, error: "Bad payload" });
     }
 // 👇 debug ENV ที่ runtime ใช้อยู่จริง
-console.log("SMTP check", {
+
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
   secure: process.env.SMTP_SECURE,
