@@ -1,133 +1,146 @@
-// /api/send-order.js — Vercel serverless (ESM, single-file)
-// แนบสลิปเป็นไฟล์, รองรับ ENV ทั้ง SMTP_* และ GMAIL_*, มี verify + fallback 465/587
+// /api/send-order.js  (Vercel serverless, ESM)
 import nodemailer from "nodemailer";
 
-// ----- ENV -----
+/* ===== ENV / CONFIG ===== */
 const ORIGIN = process.env.ALLOW_DEBUG_ORIGIN || "http://localhost:5173";
-const HOST   = process.env.SMTP_HOST || "smtp.gmail.com";
-const PORT   = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : undefined; // ถ้าไม่ได้เซ็ต ปล่อยว่าง
-const SECURE = (() => {
-  if (process.env.SMTP_SECURE == null) return PORT === 465; // เดาอัตโนมัติ
-  const v = String(process.env.SMTP_SECURE).toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-})();
-const USER   = process.env.SMTP_USER || process.env.GMAIL_USER;
-const PASS   = process.env.SMTP_PASS || process.env.GMAIL_APP_PASS;
-const TO     = process.env.TO_EMAIL || USER;          // กล่องปลายทาง
-const FROM   = process.env.MAIL_FROM || USER;         // เช่น "DVD Shop <you@gmail.com>"
 
-// ----- helpers -----
-function makeAttachment(slip) {
-  if (!slip?.base64) return null;
-  const raw = String(slip.base64);
-  const b64 = raw.includes(",") ? raw.split(",")[1] : raw;
-  return {
+const HOST   = process.env.SMTP_HOST  || "smtp.gmail.com";
+const PORT   = Number(process.env.SMTP_PORT || 465);
+const SECURE = (() => {
+  const v = String(process.env.SMTP_SECURE ?? (PORT === 465 ? "1" : "0")).toLowerCase();
+  return v === "1" || v === "true";
+})();
+
+const USER     = process.env.SMTP_USER || "";
+const PASS     = process.env.SMTP_PASS || "";
+const TO_STORE = process.env.TO_EMAIL  || USER;               // ปลายทางร้าน (แจ้งโอน)
+const FROM     = process.env.MAIL_FROM || USER;               // ชื่อ/อีเมลผู้ส่ง
+
+/* ===== Utils ===== */
+function toAttachments(slip) {
+  if (!slip?.base64) return [];
+  const [, b64maybe] = String(slip.base64).split(",");
+  const b64 = b64maybe || slip.base64;
+  return [{
     filename: slip.filename || "slip.png",
     content: Buffer.from(b64, "base64"),
     contentType: slip.mime || "image/png",
     encoding: "base64",
-    contentDisposition: "attachment",
-  };
+    cid: "slip-1",
+  }];
 }
 
-async function attemptTransport({ host, port, secure }) {
-  const t = nodemailer.createTransport({
-    host, port, secure,
-    auth: { user: USER, pass: PASS },
-    // ความเสถียร + ดีบัก
-    requireTLS: !secure,                  // ถ้า 587 -> STARTTLS
-    tls: { servername: host, minVersion: "TLSv1.2" },
-    connectionTimeout: 12000,
-    socketTimeout: 25000,
-    logger: true,                         // log คุยกับ SMTP
-    debug: true,
-  });
-  console.log(`try smtp ${host}:${port}/${secure ? "ssl" : "starttls"}`);
-  await t.verify();                       // ถ้ามีปัญหา จะ throw พร้อมรายละเอียดใน Logs
-  return t;
+function renderCartList(cart = []) {
+  if (!Array.isArray(cart) || cart.length === 0) return "<li>-</li>";
+  return cart.map(x => {
+    const qty = x.qty || 1;
+    const amt = (x.price || 0) * qty;
+    return `<li>${x.title} ×${qty} — ${amt}฿</li>`;
+  }).join("");
 }
 
-// ใช้ค่าที่ตั้งไว้ก่อน → ถ้าไม่ได้ลองสลับ 465/587 ให้อัตโนมัติ
-async function buildTransporter() {
-  // 1) ถ้าผู้ใช้กำหนด PORT/SECURE มาแล้ว ให้ลองชุดนั้นก่อน
-  if (PORT !== undefined) {
-    try { return await attemptTransport({ host: HOST, port: PORT, secure: SECURE }); }
-    catch (e) { console.warn("verify failed (env cfg):", e?.message); }
-  }
-  // 2) 465/SSL
-  try { return await attemptTransport({ host: HOST, port: 465, secure: true }); }
-  catch (e) { console.warn("verify failed (465):", e?.message); }
-  // 3) 587/STARTTLS
-  return await attemptTransport({ host: HOST, port: 587, secure: false });
+function renderEmailHTML({
+  mode, name, phone, email, address, note, orderId,
+  itemsTotal = 0, shipping = 0, grandTotal = 0, amount = 0,
+  cart = [], includeSlip = false
+}) {
+  const title = mode === "order" ? "สรุปรายการสั่งซื้อ" : "แจ้งโอน";
+  const total = grandTotal || amount || 0;
+  return `
+  <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.6">
+    <h2 style="margin:0 0 8px">${title}</h2>
+    <p><b>หมายเลขสั่งซื้อ:</b> ${orderId || "-"}</p>
+    <p><b>ชื่อ:</b> ${name || "-"} &nbsp;&nbsp; <b>เบอร์:</b> ${phone || "-"}</p>
+    ${email ? `<p><b>อีเมล:</b> ${email}</p>` : ""}
+    ${address ? `<p><b>ที่อยู่จัดส่ง:</b> ${address}</p>` : ""}
+
+    <h3 style="margin:16px 0 6px">รายการ</h3>
+    <ul style="margin:0;padding-left:18px">${renderCartList(cart)}</ul>
+
+    <p style="margin:10px 0 0;color:#555">
+      ยอดสินค้า: <b>${itemsTotal}฿</b> &nbsp;|&nbsp; ค่าส่ง: <b>${shipping}฿</b> &nbsp;|&nbsp;
+      รวมทั้งสิ้น: <b>${total}฿</b>
+    </p>
+
+    ${note ? `<p style="margin-top:10px"><b>หมายเหตุ:</b> ${note}</p>` : ""}
+
+    ${includeSlip ? `
+      <p style="margin-top:12px">
+        <img src="cid:slip-1" alt="slip" style="max-width:480px;border:1px solid #eee;border-radius:8px" />
+      </p>` : ""
+    }
+  </div>`;
 }
 
-// ----- handler -----
+/* ===== Handler ===== */
 export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", ORIGIN);
   res.setHeader("Access-Control-Allow-Headers", "content-type");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST")  return res.status(405).json({ error: "Method Not Allowed" });
-
-  if (!USER || !PASS) {
-    console.error("MAIL CREDS MISSING", { hasUser: !!USER, hasPass: !!PASS });
-    return res.status(500).json({ error: "MAIL_CREDENTIALS_MISSING" });
-  }
+  if (req.method !== "POST")   return res.status(405).json({ error: "Method Not Allowed" });
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const { name, phone, email, orderId, amount, bank, note,
-            cart, itemsTotal, shipping, grandTotal, slip } = body;
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const {
+      // ฟิลด์ร่วม
+      mode,                       // "order" => ส่งหาลูกค้า | อื่นๆ => แจ้งโอนเข้าร้าน
+      name, phone, email, address, note,
+      orderId, amount, bank,
+      cart = [], itemsTotal = 0, shipping = 0, grandTotal = 0,
+      slip,                       // สำหรับแจ้งโอน
+      toEmail,                    // อีเมลลูกค้า (โหมด order)
+    } = body;
 
-    const att = makeAttachment(slip);
-    console.log("slip?", !!slip, "len", slip?.base64?.length, "mime", slip?.mime, "hasAtt", !!att);
-
-    // ✅ สร้าง transporter (verify + fallback 465→587)
-    const transporter = await buildTransporter();
-
-    const subject = `แจ้งโอน ${orderId || "-"} | ${name || ""} ${phone || ""}`;
-    const text = [
-      `ชื่อ: ${name || "-"}`,
-      `เบอร์: ${phone || "-"}`,
-      `อีเมล: ${email || "-"}`,
-      `ออเดอร์: ${orderId || "-"}`,
-      `ยอดโอน: ${amount || "-"}`,
-      `ธนาคาร: ${bank || "-"}`,
-      `หมายเหตุ: ${note || "-"}`,
-      "",
-      cart?.length ? `รายการ (${cart.length}):` : "",
-      ...(cart || []).map(x => `• ${x.title} x${x.qty} = ${x.price * x.qty}฿`),
-      cart?.length ? `ยอดสินค้า: ${itemsTotal}฿ | ค่าส่ง: ${shipping}฿ | รวม: ${grandTotal}฿` : "",
-    ].filter(Boolean).join("\n");
-
-    const html = `
-      <div style="font-family:system-ui,sans-serif">
-        <h2>แจ้งโอน ${orderId || "-"}</h2>
-        <p><b>ชื่อ:</b> ${name || "-"} | <b>เบอร์:</b> ${phone || "-"}</p>
-        <p><b>อีเมล:</b> ${email || "-"}</p>
-        <p><b>ยอดโอน:</b> ${amount || "-"} | <b>ธนาคาร:</b> ${bank || "-"}</p>
-        ${note ? `<p><b>หมายเหตุ:</b> ${note}</p>` : ""}
-        ${Array.isArray(cart) && cart.length ? `
-          <hr/><h3>รายการ</h3>
-          <ul>${cart.map(x => `<li>${x.title} x${x.qty} = <b>${x.price * x.qty}฿</b></li>`).join("")}</ul>
-          <p>ยอดสินค้า: <b>${itemsTotal}฿</b> | ค่าส่ง: <b>${shipping}฿</b> | รวม: <b>${grandTotal}฿</b></p>
-        ` : ""}
-      </div>
-    `;
-
-    const mail = await transporter.sendMail({
-      from: FROM,                   // ควรเป็นเมลเดียวกับ USER เมื่อใช้ Gmail
-      to: TO,
-      replyTo: email || undefined,
-      subject, text, html,
-      attachments: att ? [att] : [],
+    const transporter = nodemailer.createTransport({
+      host: HOST,
+      port: PORT,
+      secure: SECURE,
+      auth: { user: USER, pass: PASS },
     });
 
-    console.log("sent id", mail.messageId);
-    res.status(200).json({ ok: true, id: mail.messageId, attachmentCount: att ? 1 : 0 });
+    // === โหมดสั่งซื้อ: ส่งสรุปให้ลูกค้า ===
+    if (mode === "order" && toEmail) {
+      const html = renderEmailHTML({
+        mode: "order",
+        name, phone, email, address, note, orderId,
+        itemsTotal, shipping, grandTotal, amount,
+        cart, includeSlip: false,
+      });
+
+      const mail = await transporter.sendMail({
+        from: FROM,
+        to: toEmail,                   // ลูกค้า
+        replyTo: TO_STORE,             // ลูกค้ากดตอบกลับ, เด้งเข้าร้าน
+        subject: `สรุปรายการสั่งซื้อ #${orderId || ""}`,
+        html,
+      });
+
+      return res.status(200).json({ ok: true, mode: "order", id: mail.messageId, sentTo: toEmail });
+    }
+
+    // === แจ้งโอน: ส่งเข้าร้าน (แนบสลิปถ้ามี) ===
+    const attachments = toAttachments(slip);
+    const html = renderEmailHTML({
+      mode: "payment",
+      name, phone, email, address, note, orderId, bank,
+      itemsTotal, shipping, grandTotal, amount,
+      cart, includeSlip: attachments.length > 0,
+    });
+
+    const mail = await transporter.sendMail({
+      from: FROM,
+      to: TO_STORE,                    // ร้าน
+      replyTo: email || undefined,     // ร้านตอบกลับไปหาลูกค้าได้
+      subject: `แจ้งโอน #${orderId || ""}`,
+      html,
+      attachments,
+    });
+
+    return res.status(200).json({ ok: true, mode: "payment", id: mail.messageId });
   } catch (err) {
-    console.error("send-order error:", err);
-    res.status(500).json({ error: String(err?.message || err) });
+    console.error(err);
+    return res.status(500).json({ error: String(err.message || err) });
   }
 }
