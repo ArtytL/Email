@@ -1,18 +1,22 @@
-// /api/send-order.js — Vercel serverless (ESM)
+// /api/send-order.js — Vercel serverless (ESM, single-file)
+// แนบสลิปเป็นไฟล์, รองรับ ENV ทั้ง SMTP_* และ GMAIL_*, มี verify + fallback 465/587
 import nodemailer from "nodemailer";
 
+// ----- ENV -----
 const ORIGIN = process.env.ALLOW_DEBUG_ORIGIN || "http://localhost:5173";
 const HOST   = process.env.SMTP_HOST || "smtp.gmail.com";
-const PORT   = Number(process.env.SMTP_PORT || 465);
+const PORT   = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : undefined; // ถ้าไม่ได้เซ็ต ปล่อยว่าง
 const SECURE = (() => {
-  const v = String(process.env.SMTP_SECURE ?? (PORT === 465 ? "1" : "0")).toLowerCase();
+  if (process.env.SMTP_SECURE == null) return PORT === 465; // เดาอัตโนมัติ
+  const v = String(process.env.SMTP_SECURE).toLowerCase();
   return v === "1" || v === "true" || v === "yes";
 })();
 const USER   = process.env.SMTP_USER || process.env.GMAIL_USER;
 const PASS   = process.env.SMTP_PASS || process.env.GMAIL_APP_PASS;
-const TO     = process.env.TO_EMAIL || USER;
-const FROM   = process.env.MAIL_FROM || USER;
+const TO     = process.env.TO_EMAIL || USER;          // กล่องปลายทาง
+const FROM   = process.env.MAIL_FROM || USER;         // เช่น "DVD Shop <you@gmail.com>"
 
+// ----- helpers -----
 function makeAttachment(slip) {
   if (!slip?.base64) return null;
   const raw = String(slip.base64);
@@ -22,10 +26,42 @@ function makeAttachment(slip) {
     content: Buffer.from(b64, "base64"),
     contentType: slip.mime || "image/png",
     encoding: "base64",
-    contentDisposition: "attachment", // <-- แนบเป็นไฟล์จริงๆ
+    contentDisposition: "attachment",
   };
 }
 
+async function attemptTransport({ host, port, secure }) {
+  const t = nodemailer.createTransport({
+    host, port, secure,
+    auth: { user: USER, pass: PASS },
+    // ความเสถียร + ดีบัก
+    requireTLS: !secure,                  // ถ้า 587 -> STARTTLS
+    tls: { servername: host, minVersion: "TLSv1.2" },
+    connectionTimeout: 12000,
+    socketTimeout: 25000,
+    logger: true,                         // log คุยกับ SMTP
+    debug: true,
+  });
+  console.log(`try smtp ${host}:${port}/${secure ? "ssl" : "starttls"}`);
+  await t.verify();                       // ถ้ามีปัญหา จะ throw พร้อมรายละเอียดใน Logs
+  return t;
+}
+
+// ใช้ค่าที่ตั้งไว้ก่อน → ถ้าไม่ได้ลองสลับ 465/587 ให้อัตโนมัติ
+async function buildTransporter() {
+  // 1) ถ้าผู้ใช้กำหนด PORT/SECURE มาแล้ว ให้ลองชุดนั้นก่อน
+  if (PORT !== undefined) {
+    try { return await attemptTransport({ host: HOST, port: PORT, secure: SECURE }); }
+    catch (e) { console.warn("verify failed (env cfg):", e?.message); }
+  }
+  // 2) 465/SSL
+  try { return await attemptTransport({ host: HOST, port: 465, secure: true }); }
+  catch (e) { console.warn("verify failed (465):", e?.message); }
+  // 3) 587/STARTTLS
+  return await attemptTransport({ host: HOST, port: 587, secure: false });
+}
+
+// ----- handler -----
 export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", ORIGIN);
@@ -34,7 +70,10 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST")  return res.status(405).json({ error: "Method Not Allowed" });
 
-  if (!USER || !PASS) return res.status(500).json({ error: "MAIL_CREDENTIALS_MISSING" });
+  if (!USER || !PASS) {
+    console.error("MAIL CREDS MISSING", { hasUser: !!USER, hasPass: !!PASS });
+    return res.status(500).json({ error: "MAIL_CREDENTIALS_MISSING" });
+  }
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
@@ -42,20 +81,10 @@ export default async function handler(req, res) {
             cart, itemsTotal, shipping, grandTotal, slip } = body;
 
     const att = makeAttachment(slip);
-
-    // log ช่วยดีบัก
     console.log("slip?", !!slip, "len", slip?.base64?.length, "mime", slip?.mime, "hasAtt", !!att);
 
-    const transporter = nodemailer.createTransport({
-      host: HOST,
-      port: PORT,
-      secure: SECURE,            // true -> 465
-      auth: { user: USER, pass: PASS },
-      connectionTimeout: 10000,  // 10s
-      socketTimeout: 20000,      // 20s
-      requireTLS: !SECURE,       // ถ้าใช้ 587 จะบังคับ STARTTLS
-      tls: { servername: HOST },
-    });
+    // ✅ สร้าง transporter (verify + fallback 465→587)
+    const transporter = await buildTransporter();
 
     const subject = `แจ้งโอน ${orderId || "-"} | ${name || ""} ${phone || ""}`;
     const text = [
@@ -88,12 +117,10 @@ export default async function handler(req, res) {
     `;
 
     const mail = await transporter.sendMail({
-      from: FROM,
+      from: FROM,                   // ควรเป็นเมลเดียวกับ USER เมื่อใช้ Gmail
       to: TO,
       replyTo: email || undefined,
-      subject,
-      text,
-      html,
+      subject, text, html,
       attachments: att ? [att] : [],
     });
 
