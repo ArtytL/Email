@@ -8,14 +8,12 @@ const SECURE = String(process.env.SMTP_SECURE ?? "").toLowerCase() === "true" ||
 const USER = process.env.SMTP_USER;
 const PASS = process.env.SMTP_PASS;
 
-// อีเมลร้านค้าสำรองไว้ใช้เวลาต้องส่งเข้าร้าน
 const SHOP_EMAIL = process.env.TO_EMAIL || USER;
 const MAIL_FROM = process.env.MAIL_FROM || `DVD Shop <${USER}>`;
 
 // ---------- CORS ----------
 function setCORS(req, res) {
   const origin = req.headers.origin || "";
-  // dev ให้ผ่าน localhost ทั้งหมด + โดเมนปลายทางของเรา
   const allow =
     origin.startsWith("http://localhost") ||
     origin.startsWith("https://localhost") ||
@@ -79,7 +77,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  // รับ body
   let body = {};
   try {
     body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
@@ -87,7 +84,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Bad JSON body" });
   }
 
-  // สร้าง transporter
   const transporter = nodemailer.createTransport({
     host: HOST,
     port: PORT,
@@ -99,15 +95,15 @@ export default async function handler(req, res) {
     const { mode } = body;
 
     if (mode === "order") {
-      // ส่ง "สรุปคำสั่งซื้อ" ให้ลูกค้า
+      // ส่งสรุปให้ "ลูกค้า"
       const buyerEmail = body.toEmail || body.email || body.recipient;
       if (!buyerEmail) throw new Error("Missing buyer email");
 
       const html = orderHtml(body);
       const mail = await transporter.sendMail({
         from: MAIL_FROM,
-        to: buyerEmail,              // <<< ส่งให้ลูกค้า
-        replyTo: SHOP_EMAIL,         // ลูกค้ากดตอบกลับมายังร้าน
+        to: buyerEmail,           // <<< ลูกค้า
+        replyTo: SHOP_EMAIL,      // ลูกค้าตอบกลับมาที่ร้าน
         subject: `สรุปคำสั่งซื้อของคุณ #${body.orderId || ""}`,
         text: "โปรดเปิดด้วยอีเมลที่รองรับ HTML",
         html,
@@ -117,11 +113,11 @@ export default async function handler(req, res) {
     }
 
     if (mode === "notify") {
-      // โหมด "แจ้งโอน" หรืออีเมลเข้า “ร้าน”
+      // ส่งเข้า “ร้าน” (ใช้สำหรับฟอร์มแจ้งโอน/หลังบ้าน)
       const html = orderHtml(body);
       const mail = await transporter.sendMail({
         from: MAIL_FROM,
-        to: SHOP_EMAIL,              // ส่งเข้าร้าน
+        to: SHOP_EMAIL,
         replyTo: body.email || undefined,
         subject: `แจ้งโอน/ออเดอร์ใหม่ #${body.orderId || ""}`,
         html,
