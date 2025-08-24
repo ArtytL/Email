@@ -1,62 +1,73 @@
-// api/send-order.js (ESM)
+// /api/send-order.js  (สำหรับ Vercel serverless) — ESM
 import nodemailer from "nodemailer";
 
-function withCORS(res) {
-  const origin = process.env.ALLOW_DEBUG_ORIGIN || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  return res;
-}
+const ORIGIN = process.env.ALLOW_DEBUG_ORIGIN || "http://localhost:5173";
+const USER = process.env.GMAIL_USER;
+const PASS = process.env.GMAIL_APP_PASS;
 
-async function readJSON(req) {
-  try {
-    if (req.body && typeof req.body === "object") return req.body;
-    if (typeof req.body === "string") return JSON.parse(req.body);
-    const chunks = []; for await (const c of req) chunks.push(c);
-    const raw = Buffer.concat(chunks).toString("utf8").trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) { console.error("Body parse failed:", e); return {}; }
+function toAttachments(slip) {
+  if (!slip?.base64) return [];
+  const [, b64maybe] = String(slip.base64).split(",");
+  const b64 = b64maybe || slip.base64; // รองรับทั้ง dataURL และ base64 ล้วน
+  return [{
+    filename: slip.filename || "slip.png",
+    content: Buffer.from(b64, "base64"),
+    contentType: slip.mime || "image/png",
+    encoding: "base64",
+    cid: "slip-1",
+  }];
 }
 
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") return withCORS(res).status(200).end();
-  if (req.method !== "POST") return withCORS(res).status(405).json({ ok:false, error:"Method Not Allowed" });
-
-  const { orderId, items = [], total = 0, customer = {}, bank = "", slipDataURL = "" } = await readJSON(req);
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
 
   try {
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const { name, phone, email, orderId, amount, bank, note, cart, itemsTotal, shipping, grandTotal, slip } = body;
+
     const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: !!Number(process.env.SMTP_SECURE || 0),
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user: USER, pass: PASS },
     });
 
-    const attachments = [];
-    if (slipDataURL && slipDataURL.includes(",")) {
-      const b64 = slipDataURL.split(",")[1] || "";
-      if (b64) attachments.push({ filename: `slip-${orderId||"noid"}.png`, content: Buffer.from(b64,"base64") });
-    }
+    const attachments = toAttachments(slip);
 
-    const itemsHtml = items.map(it => `<li>${it.title||it.name||"รายการ"} × ${it.qty||1} — ฿${Number(it.price||0).toLocaleString("th-TH")}</li>`).join("");
-    const html = `<h3>ออร์เดอร์ใหม่ #${orderId||"-"}</h3>
-      <p>ลูกค้า: ${customer.name||"-"} (${customer.phone||"-"}) — ${customer.email||"-"}</p>
-      <p>ธนาคาร: ${bank||"-"}</p><ul>${itemsHtml}</ul>
-      <p><b>รวมทั้งหมด:</b> ฿${Number(total||0).toLocaleString("th-TH")}</p>`;
+    const html = `
+      <div style="font-family:system-ui,sans-serif">
+        <h2>แจ้งโอน ${orderId || "-"}</h2>
+        <p><b>ชื่อ:</b> ${name || "-"} | <b>เบอร์:</b> ${phone || "-"}</p>
+        <p><b>อีเมล:</b> ${email || "-"}</p>
+        <p><b>ยอดโอน:</b> ${amount || "-"} | <b>ธนาคาร:</b> ${bank || "-"}</p>
+        ${note ? `<p><b>หมายเหตุ:</b> ${note}</p>` : ""}
+        ${Array.isArray(cart) && cart.length ? `
+          <hr/><h3>รายการ</h3>
+          <ul>${cart.map(x => `<li>${x.title} x${x.qty} = <b>${x.price * x.qty}฿</b></li>`).join("")}</ul>
+          <p>ยอดสินค้า: <b>${itemsTotal}฿</b> | ค่าส่ง: <b>${shipping}฿</b> | รวม: <b>${grandTotal}฿</b></p>
+        ` : ""}
+        ${attachments.length ? `<hr/><p><img src="cid:slip-1" style="max-width:480px;border:1px solid #eee;border-radius:8px"/></p>` : ""}
+      </div>
+    `;
 
-    const info = await transporter.sendMail({
-      from: process.env.MAIL_FROM || process.env.SMTP_USER,
-      to: process.env.TO_EMAIL,
-      replyTo: customer.email || undefined,
-      subject: `โล๊ะเเผ่นมือ 2 ออร์เดอร์ใหม่ ${orderId||""} (฿${total||0})`,
+    const mail = await transporter.sendMail({
+      from: `โล๊ะแผ่นมือ 2 <${USER}>`,
+      to: USER,
+      replyTo: email || undefined,
+      subject: `แจ้งโอน ${orderId || "-"} | ${name || ""} ${phone || ""}`,
+      text: `ชื่อ: ${name}\nเบอร์: ${phone}\nอีเมล: ${email}\nออเดอร์: ${orderId}\nยอดโอน: ${amount}\nธนาคาร: ${bank}\nหมายเหตุ: ${note || "-"}`,
       html,
-      attachments,
+      attachments, // ⭐ สำคัญ: แนบสลิป
     });
 
-    return withCORS(res).status(200).json({ ok:true, messageId: info.messageId });
-  } catch (e) {
-    console.error("send-order error:", e);
-    return withCORS(res).status(500).json({ ok:false, error: String(e?.message||e) });
+    res.status(200).json({ ok: true, id: mail.messageId, hasAttachment: !!attachments.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err?.message || err) });
   }
 }
