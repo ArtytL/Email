@@ -1,22 +1,29 @@
-// /api/send-order.js  — Vercel serverless (ESM)
+// /api/send-order.js — Vercel serverless (ESM)
 import nodemailer from "nodemailer";
 
+// ---- ENV (รองรับทั้ง SMTP_* และ GMAIL_*) ----
 const ORIGIN = process.env.ALLOW_DEBUG_ORIGIN || "http://localhost:5173";
-const USER   = process.env.GMAIL_USER;
-const PASS   = process.env.GMAIL_APP_PASS;
+const HOST   = process.env.SMTP_HOST || "smtp.gmail.com";
+const PORT   = Number(process.env.SMTP_PORT || 465);
+const SECURE = (() => {
+  const v = String(process.env.SMTP_SECURE ?? (PORT === 465 ? "1" : "0")).toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+})();
+const USER   = process.env.SMTP_USER || process.env.GMAIL_USER;
+const PASS   = process.env.SMTP_PASS || process.env.GMAIL_APP_PASS;
+const TO     = process.env.TO_EMAIL || USER; // กล่องปลายทาง (fallback เป็น USER)
+const FROM   = process.env.MAIL_FROM || USER; // "ชื่อร้าน <you@gmail.com>" ก็ได้
 
-// แปลง slip.base64 → แนบทั้งแบบ inline (cid) และไฟล์แนบจริง
 function makeAttachments(slip) {
   if (!slip?.base64) return [];
   const raw = String(slip.base64);
   const b64 = raw.includes(",") ? raw.split(",")[1] : raw;
+  const buf = Buffer.from(b64, "base64");
   const filename = slip.filename || "slip.png";
   const mime = slip.mime || "image/png";
-  const buf = Buffer.from(b64, "base64");
+  // แนบทั้งแบบ inline + ไฟล์แนบ
   return [
-    // แสดงในเนื้อเมล
     { filename, content: buf, contentType: mime, encoding: "base64", cid: "slip-inline" },
-    // เป็นไฟล์แนบจริง ๆ
     { filename, content: buf, contentType: mime, encoding: "base64", contentDisposition: "attachment" },
   ];
 }
@@ -29,23 +36,25 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST")  return res.status(405).json({ error: "Method Not Allowed" });
 
+  // กันพลาด: ไม่มี creds → ตัดจบเลย
+  if (!USER || !PASS) {
+    console.error("MAIL CREDS MISSING", { hasUser: !!USER, hasPass: !!PASS });
+    return res.status(500).json({ error: "MAIL_CREDENTIALS_MISSING" });
+  }
+
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const {
-      name, phone, email, orderId, amount, bank, note,
-      cart, itemsTotal, shipping, grandTotal, slip
-    } = body;
+    const { name, phone, email, orderId, amount, bank, note,
+            cart, itemsTotal, shipping, grandTotal, slip } = body;
 
     const attachments = makeAttachments(slip);
-
-    // logs ดีบัก
     console.log("slip?", !!slip, "len", slip?.base64?.length, "mime", slip?.mime);
     console.log("attachments length", attachments.length);
 
     const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
+      host: HOST,
+      port: PORT,
+      secure: SECURE,             // true=465 / false=587
       auth: { user: USER, pass: PASS },
     });
 
@@ -61,7 +70,7 @@ export default async function handler(req, res) {
       "",
       cart?.length ? `รายการ (${cart.length}):` : "",
       ...(cart || []).map(x => `• ${x.title} x${x.qty} = ${x.price * x.qty}฿`),
-      cart?.length ? `ยอดสินค้า: ${itemsTotal}฿ | ค่าส่ง: ${shipping}฿ | รวม: ${grandTotal}฿` : ""
+      cart?.length ? `ยอดสินค้า: ${itemsTotal}฿ | ค่าส่ง: ${shipping}฿ | รวม: ${grandTotal}฿` : "",
     ].filter(Boolean).join("\n");
 
     const html = `
@@ -82,19 +91,19 @@ export default async function handler(req, res) {
     `;
 
     const mail = await transporter.sendMail({
-      from: `โล๊ะแผ่นมือ 2 <${USER}>`,
-      to: USER,                     // ส่งเข้ากล่องของร้าน
-      replyTo: email || undefined,  // กดตอบกลับถึงลูกค้าได้
+      from: FROM,       // เช่น "DVD Shop <artyt.sun@gmail.com>"
+      to: TO,           // กล่องร้าน
+      replyTo: email || undefined,
       subject,
       text,
       html,
-      attachments,                  // ⭐ แนบสลิปทั้งแบบ inline + ไฟล์แนบ
+      attachments,
     });
 
     console.log("sent id", mail.messageId);
-    return res.status(200).json({ ok: true, id: mail.messageId, attachmentCount: attachments.length });
+    res.status(200).json({ ok: true, id: mail.messageId, attachmentCount: attachments.length });
   } catch (err) {
     console.error("send-order error:", err);
-    return res.status(500).json({ error: String(err?.message || err) });
+    res.status(500).json({ error: String(err?.message || err) });
   }
 }
