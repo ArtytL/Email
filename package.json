@@ -1,0 +1,10 @@
+{
+  "name": "email-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "nodemailer": "^6.9.8"
+  }
+}
