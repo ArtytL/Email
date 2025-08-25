@@ -1,180 +1,224 @@
-// /api/send-order.js  (ESM)
+// /api/send-order.js  (Vercel Serverless, ESM)
 import nodemailer from "nodemailer";
 
-const ORIGIN_ALLOW = process.env.ALLOW_DEBUG_ORIGIN || "http://localhost:5173";
+/* ====== ENV ======
+ * ตั้งค่าใน Vercel → Project → Settings → Environment Variables
+ *  จำเป็น: SMTP_USER, SMTP_PASS   (ถ้าใช้ Gmail → App Password)
+ *  ทางเลือก: SMTP_HOST(ปกติ smtp.gmail.com) / SMTP_PORT(465/587) / SMTP_SECURE(1/0)
+ *           SHOP_EMAIL(อีเมลร้านไว้รับออเดอร์) / MAIL_FROM("โล๊ะ DVD <you@gmail.com>")
+ *           ALLOW_DEBUG_ORIGIN (เช่น http://localhost:5173)
+ */
+const ORIGIN =
+  process.env.ALLOW_DEBUG_ORIGIN ||
+  "http://localhost:5173"; // เปลี่ยนได้ตามสภาพแวดล้อม
+
 const HOST = process.env.SMTP_HOST || "smtp.gmail.com";
 const PORT = Number(process.env.SMTP_PORT || 465);
-const SECURE = String(process.env.SMTP_SECURE ?? "").toLowerCase() === "true" || PORT === 465;
-const USER = process.env.SMTP_USER;
-const PASS = process.env.SMTP_PASS;
+const SECURE =
+  String(process.env.SMTP_SECURE ?? (PORT === 465 ? "1" : "0")).toLowerCase() ===
+  "1";
 
-const SHOP_EMAIL = process.env.TO_EMAIL || USER;
-const MAIL_FROM = process.env.MAIL_FROM || `DVD Shop <${USER}>`;
+const USER = process.env.SMTP_USER || process.env.GMAIL_USER; // เผื่อใช้ key เก่า
+const PASS = process.env.SMTP_PASS || process.env.GMAIL_APP_PASS;
 
-// ---------- CORS ----------
-function setCORS(req, res) {
-  const origin = req.headers.origin || "";
-  const allow =
-    origin.startsWith("http://localhost") ||
-    origin.startsWith("https://localhost") ||
-    origin === ORIGIN_ALLOW ||
-    origin.endsWith(".vercel.app");
+const SHOP_EMAIL = process.env.SHOP_EMAIL || USER; // กล่องอีเมลร้าน
+const MAIL_FROM =
+  process.env.MAIL_FROM || `โล๊ะ DVD มือสอง <${USER || "no-reply@example.com"}>`;
 
-  res.setHeader("Access-Control-Allow-Origin", allow ? origin : ORIGIN_ALLOW);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+/* ---------- utils ---------- */
+function safe(x) {
+  return (x ?? "").toString().trim();
 }
 
-// ---------- HTML Builder ----------
-function orderHtml(payload) {
+function toAttachments(slip) {
+  // รับ slip: { base64: 'data:image/png;base64,AAA...', filename, mime }
+  if (!slip || !slip.base64) return [];
+  const raw = safe(slip.base64);
+  const isDataUrl = raw.startsWith("data:");
+  const b64 = isDataUrl ? raw.split(",")[1] : raw;
+  const mime =
+    safe(slip.mime) ||
+    (isDataUrl ? raw.slice(5, raw.indexOf(";")) : "image/png");
+  const filename = safe(slip.filename) || "slip.png";
+
+  try {
+    return [
+      {
+        filename,
+        content: Buffer.from(b64, "base64"),
+        contentType: mime,
+        encoding: "base64",
+      },
+    ];
+  } catch {
+    return []; // ถ้า base64 เพี้ยน ก็ไม่แนบ
+  }
+}
+
+function baht(n) {
+  if (Number.isFinite(n)) return `${n.toLocaleString("th-TH")}฿`;
+  const num = Number(n || 0);
+  return `${num.toLocaleString("th-TH")}฿`;
+}
+
+function listRows(cart = []) {
+  return (cart || [])
+    .map(
+      (it) => `
+      <tr>
+        <td>${safe(it.title || it.name)}</td>
+        <td style="text-align:center">${safe(it.qty) || 1}</td>
+        <td style="text-align:right">${baht(it.price)}</td>
+      </tr>`
+    )
+    .join("");
+}
+
+function orderHtmlAdmin(b) {
   const {
-    orderId = "",
+    name,
+    phone,
+    email,
+    orderId,
     cart = [],
     itemsTotal = 0,
     shipping = 0,
     grandTotal = 0,
-    buyer = {},
-  } = payload;
-
-  const rows = cart
-    .map(
-      (x) =>
-        `<tr><td>${x.title}</td><td align="right">${x.qty || 1}</td><td align="right">${(
-          (x.price || 0) * (x.qty || 1)
-        ).toLocaleString()}฿</td></tr>`
-    )
-    .join("");
-
+    note,
+    bank,
+  } = b || {};
   return `
-  <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.6">
-    <h2>สรุปคำสั่งซื้อ #${orderId}</h2>
-    <table width="100%" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #eee">
+  <div style="font-family:system-ui,sans-serif;line-height:1.6">
+    <h2 style="margin:0 0 8px">มีออเดอร์ใหม่</h2>
+    <p style="margin:0 0 12px;color:#555">
+      หมายเลขสั่งซื้อ: <b>${safe(orderId) || "-"}</b>
+    </p>
+
+    <table border="0" cellpadding="8" cellspacing="0" style="width:100%;border:1px solid #eee;border-collapse:collapse">
       <thead>
-        <tr style="background:#fafafa"><th align="left">รายการ</th><th align="right">จำนวน</th><th align="right">ราคา</th></tr>
+        <tr style="background:#fafafa">
+          <th align="left">รายการ</th>
+          <th align="center" width="80">จำนวน</th>
+          <th align="right" width="120">ราคา</th>
+        </tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${listRows(cart)}</tbody>
       <tfoot>
-        <tr><td colspan="2"><b>ยอดสินค้า</b></td><td align="right">${itemsTotal.toLocaleString()}฿</td></tr>
-        <tr><td colspan="2"><b>ค่าส่ง</b></td><td align="right">${shipping.toLocaleString()}฿</td></tr>
-        <tr><td colspan="2"><b>รวมทั้งสิ้น</b></td><td align="right"><b>${grandTotal.toLocaleString()}฿</b></td></tr>
+        <tr><td colspan="2" align="right" style="border-top:1px solid #eee">ยอดสินค้า</td><td align="right" style="border-top:1px solid #eee">${baht(itemsTotal)}</td></tr>
+        <tr><td colspan="2" align="right">ค่าส่ง</td><td align="right">${baht(shipping)}</td></tr>
+        <tr><td colspan="2" align="right"><b>รวมทั้งสิ้น</b></td><td align="right"><b>${baht(grandTotal)}</b></td></tr>
       </tfoot>
     </table>
 
-    <h3 style="margin-top:16px">ข้อมูลผู้สั่งซื้อ</h3>
-    <div>ชื่อ: ${buyer.name || "-"}</div>
-    <div>โทร: ${buyer.phone || "-"}</div>
-    <div>อีเมล: ${buyer.email || "-"}</div>
-    <div>ที่อยู่: ${buyer.address || "-"}</div>
-    <div>หมายเหตุ: ${buyer.note || "-"}</div>
+    <h3 style="margin:16px 0 6px">ข้อมูลผู้สั่งซื้อ</h3>
+    <p style="margin:0">ชื่อ: ${safe(name) || "-"}</p>
+    <p style="margin:0">เบอร์: ${safe(phone) || "-"}</p>
+    <p style="margin:0">อีเมล: ${safe(email) || "-"}</p>
+    <p style="margin:0">ธนาคาร: ${safe(bank) || "-"}</p>
+    ${
+      note
+        ? `<p style="margin:8px 0 0">หมายเหตุ: ${safe(note)}</p>`
+        : ""
+    }
+    <p style="margin:16px 0 0;color:#777">* แนบสลิปไว้ในไฟล์แนบ</p>
   </div>`;
 }
 
+function orderHtmlCustomer(b) {
+  const { name, orderId, grandTotal, shipping } = b || {};
+  return `
+  <div style="font-family:system-ui,sans-serif;line-height:1.6">
+    <h2 style="margin:0 0 8px">ยืนยันคำสั่งซื้อของคุณ</h2>
+    <p>หมายเลขสั่งซื้อ: <b>${safe(orderId) || "-"}</b></p>
+    <p>ชื่อผู้สั่งซื้อ: ${safe(name) || "-"}</p>
+    <p>ยอดรวมทั้งสิ้น: <b>${baht(grandTotal)}</b> (รวมค่าส่ง ${baht(
+    shipping
+  )})</p>
+    <p>หากต้องการแก้ไขข้อมูล/สอบถามเพิ่มเติม สามารถตอบกลับอีเมลฉบับนี้ได้ทันทีครับ</p>
+  </div>`;
+}
+
+/* ---------- handler ---------- */
 export default async function handler(req, res) {
-  setCORS(req, res);
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
+  // parse body
   let body = {};
   try {
-    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-  } catch {
-    return res.status(400).json({ error: "Bad JSON body" });
+    body =
+      typeof req.body === "string"
+        ? JSON.parse(req.body || "{}")
+        : req.body || {};
+  } catch (err) {
+    return res.status(400).json({ error: "Invalid JSON body" });
+  }
+
+  // สร้าง transporter
+  if (!USER || !PASS) {
+    return res.status(500).json({
+      error:
+        "SMTP credentials are missing. Please set SMTP_USER and SMTP_PASS.",
+    });
   }
 
   const transporter = nodemailer.createTransport({
     host: HOST,
     port: PORT,
-    secure: SECURE,
+    secure: SECURE, // true=465 / false=587
     auth: { user: USER, pass: PASS },
   });
 
+  // เตรียมข้อมูลอีเมล
+  const attachments = toAttachments(body.slip);
+  const buyerEmail = safe(body.email).toLowerCase();
+  const buyerName = safe(body.name);
+  const buyerPhone = safe(body.phone);
+  const orderId = safe(body.orderId);
+
+  // 1) ส่งให้ "ร้าน/แอดมิน"
   try {
-    const { mode } = body;
-
-    if (mode === "order") {
-      // ส่งสรุปให้ "ลูกค้า"
-      const buyerEmail = body.toEmail || body.email || body.recipient;
-      if (!buyerEmail) throw new Error("Missing buyer email");
-
-      const html = orderHtml(body);
-      const USER = process.env.SMTP_USER || process.env.GMAIL_USER;
-const FROM = process.env.MAIL_FROM || `DVD Shop <${USER}>`;
-const TO_ADMIN = process.env.TO_EMAIL || USER; // กล่องแอดมิน
-const TO_CUSTOMER = (email || "").trim().toLowerCase();
-
-// ----- สร้าง HTML/ข้อความ 2 เวอร์ชัน -----
-const adminSubject   = `มีออเดอร์ใหม่ – ${name || ""} ${phone || ""} | ${orderId || ""}`;
-const customerSubject = `ยืนยันคำสั่งซื้อของคุณ – ${orderId || ""}`;
-
-// htmlForAdmin / textForAdmin: ใช้รายละเอียดครบ ๆ + แนบสลิปถ้ามี
-const htmlForAdmin = html;              // ถ้ามีตัวแปร html เดิมอยู่แล้ว เอามาใช้ได้เลย
-const textForAdmin = `ชื่อ: ${name}\nเบอร์: ${phone}\nอีเมล: ${email}\nหมายเลขสั่งซื้อ: ${orderId}\nยอดรวม: ${grandTotal}฿`;
-
-// htmlForCustomer / textForCustomer: เวอร์ชันลูกค้า (ไม่ต้องแนบสลิป)
-const htmlForCustomer = `
-  <div style="font-family:system-ui,sans-serif">
-    <h2>ยืนยันคำสั่งซื้อของคุณ</h2>
-    <p>หมายเลขสั่งซื้อ: <b>${orderId || "-"}</b></p>
-    <p>ชื่อ: ${name || "-"}</p>
-    <p>ยอดรวมทั้งสิ้น: <b>${grandTotal}฿</b> (รวมค่าส่ง: ${shipping}฿)</p>
-    <p>หากต้องการแก้ไขข้อมูลหรือติดตามสถานะ ให้ตอบกลับอีเมลฉบับนี้ได้เลยครับ</p>
-  </div>
-`;
-const textForCustomer = `ยืนยันคำสั่งซื้อ\nหมายเลขสั่งซื้อ: ${orderId}\nยอดรวม: ${grandTotal}฿`;
-
-// ----- ส่งให้ "แอดมิน" -----
-await transporter.sendMail({
-  from: FROM,
-  to: TO_ADMIN,
-  replyTo: TO_CUSTOMER || undefined,          // กด Reply แล้วเด้งหาลูกค้า
-  subject: adminSubject,
-  text: textForAdmin,
-  html: htmlForAdmin,
-  attachments,                                // แนบสลิปถ้ามี
-});
-
-// ----- ส่งให้ "ลูกค้า" -----
-if (TO_CUSTOMER) {
-  await transporter.sendMail({
-    from: FROM,
-    to: TO_CUSTOMER,
-    replyTo: TO_ADMIN,                         // ลูกค้ากด Reply เด้งหาแอดมิน
-    subject: customerSubject,
-    text: textForCustomer,
-    html: htmlForCustomer,
-    // ไม่จำเป็นต้องแนบสลิปสำหรับลูกค้า
-  });
-}
-
-      return res.status(200).json({ ok: true, id: mail.messageId, to: buyerEmail });
-    }
-
-    if (mode === "notify") {
-      // ส่งเข้า “ร้าน” (ใช้สำหรับฟอร์มแจ้งโอน/หลังบ้าน)
-      const html = orderHtml(body);
-      const mail = await transporter.sendMail({
-        from: MAIL_FROM,
-        to: SHOP_EMAIL,
-        replyTo: body.email || undefined,
-        subject: `แจ้งโอน/ออเดอร์ใหม่ #${body.orderId || ""}`,
-        html,
-      });
-      return res.status(200).json({ ok: true, id: mail.messageId, to: SHOP_EMAIL });
-    }
-
-    // default → ส่งเข้าร้าน
-    const mail = await transporter.sendMail({
+    await transporter.sendMail({
       from: MAIL_FROM,
       to: SHOP_EMAIL,
-      subject: "ข้อความจากหน้าเว็บ",
-      html: orderHtml(body),
+      replyTo: buyerEmail || undefined, // กด Reply แล้วเด้งหาลูกค้า
+      subject: `มีออเดอร์ใหม่ – ${buyerName} ${buyerPhone} | ${orderId}`,
+      html: orderHtmlAdmin(body),
+      attachments, // แนบสลิปถ้ามี
     });
-    return res.status(200).json({ ok: true, id: mail.messageId, to: SHOP_EMAIL });
   } catch (err) {
-    console.error("send-order error:", err);
-    return res.status(500).json({ error: String(err.message || err) });
+    console.error("send to admin failed:", err);
+    return res
+      .status(500)
+      .json({ error: "ส่งหาแอดมินไม่สำเร็จ", detail: String(err?.message) });
   }
+
+  // 2) ส่งให้ "ลูกค้า" (ถ้ากรอกอีเมล)
+  if (buyerEmail) {
+    try {
+      await transporter.sendMail({
+        from: MAIL_FROM,
+        to: buyerEmail,
+        replyTo: SHOP_EMAIL, // ลูกค้าตอบกลับเข้าร้าน
+        subject: `ยืนยันคำสั่งซื้อของคุณ – ${orderId}`,
+        html: orderHtmlCustomer(body),
+      });
+    } catch (err) {
+      console.error("send to customer failed:", err);
+      // ไม่ fail ทั้ง API — แจ้งเตือนเฉย ๆ
+    }
+  }
+
+  return res.status(200).json({
+    ok: true,
+    orderId,
+    hasAttachment: !!attachments.length,
+  });
 }
