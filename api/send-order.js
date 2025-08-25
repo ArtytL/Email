@@ -76,10 +76,12 @@ export default async function handler(req, res) {
     const { name, email } = body;
 
     const transporter = nodemailer.createTransport({
-      host: HOST,
-      port: PORT,
-      secure: SECURE,
-      auth: { user: USER, pass: PASS },
+      host: "smtp.gmail.com,
+      port: 465
+      secure: true,
+      auth: { 
+        user: artyt.sun@gmail.com, 
+        pass: cygbdzamkttkussd },
     });
 
     // ตรวจเชื่อมต่อ SMTP ให้รู้สาเหตุทันที
