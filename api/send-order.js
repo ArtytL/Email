@@ -100,14 +100,54 @@ export default async function handler(req, res) {
       if (!buyerEmail) throw new Error("Missing buyer email");
 
       const html = orderHtml(body);
-      const mail = await transporter.sendMail({
-        from: MAIL_FROM,
-        to: buyerEmail,           // <<< ลูกค้า
-        replyTo: SHOP_EMAIL,      // ลูกค้าตอบกลับมาที่ร้าน
-        subject: `สรุปคำสั่งซื้อของคุณ #${body.orderId || ""}`,
-        text: "โปรดเปิดด้วยอีเมลที่รองรับ HTML",
-        html,
-      });
+      const USER = process.env.SMTP_USER || process.env.GMAIL_USER;
+const FROM = process.env.MAIL_FROM || `DVD Shop <${USER}>`;
+const TO_ADMIN = process.env.TO_EMAIL || USER; // กล่องแอดมิน
+const TO_CUSTOMER = (email || "").trim().toLowerCase();
+
+// ----- สร้าง HTML/ข้อความ 2 เวอร์ชัน -----
+const adminSubject   = `มีออเดอร์ใหม่ – ${name || ""} ${phone || ""} | ${orderId || ""}`;
+const customerSubject = `ยืนยันคำสั่งซื้อของคุณ – ${orderId || ""}`;
+
+// htmlForAdmin / textForAdmin: ใช้รายละเอียดครบ ๆ + แนบสลิปถ้ามี
+const htmlForAdmin = html;              // ถ้ามีตัวแปร html เดิมอยู่แล้ว เอามาใช้ได้เลย
+const textForAdmin = `ชื่อ: ${name}\nเบอร์: ${phone}\nอีเมล: ${email}\nหมายเลขสั่งซื้อ: ${orderId}\nยอดรวม: ${grandTotal}฿`;
+
+// htmlForCustomer / textForCustomer: เวอร์ชันลูกค้า (ไม่ต้องแนบสลิป)
+const htmlForCustomer = `
+  <div style="font-family:system-ui,sans-serif">
+    <h2>ยืนยันคำสั่งซื้อของคุณ</h2>
+    <p>หมายเลขสั่งซื้อ: <b>${orderId || "-"}</b></p>
+    <p>ชื่อ: ${name || "-"}</p>
+    <p>ยอดรวมทั้งสิ้น: <b>${grandTotal}฿</b> (รวมค่าส่ง: ${shipping}฿)</p>
+    <p>หากต้องการแก้ไขข้อมูลหรือติดตามสถานะ ให้ตอบกลับอีเมลฉบับนี้ได้เลยครับ</p>
+  </div>
+`;
+const textForCustomer = `ยืนยันคำสั่งซื้อ\nหมายเลขสั่งซื้อ: ${orderId}\nยอดรวม: ${grandTotal}฿`;
+
+// ----- ส่งให้ "แอดมิน" -----
+await transporter.sendMail({
+  from: FROM,
+  to: TO_ADMIN,
+  replyTo: TO_CUSTOMER || undefined,          // กด Reply แล้วเด้งหาลูกค้า
+  subject: adminSubject,
+  text: textForAdmin,
+  html: htmlForAdmin,
+  attachments,                                // แนบสลิปถ้ามี
+});
+
+// ----- ส่งให้ "ลูกค้า" -----
+if (TO_CUSTOMER) {
+  await transporter.sendMail({
+    from: FROM,
+    to: TO_CUSTOMER,
+    replyTo: TO_ADMIN,                         // ลูกค้ากด Reply เด้งหาแอดมิน
+    subject: customerSubject,
+    text: textForCustomer,
+    html: htmlForCustomer,
+    // ไม่จำเป็นต้องแนบสลิปสำหรับลูกค้า
+  });
+}
 
       return res.status(200).json({ ok: true, id: mail.messageId, to: buyerEmail });
     }
