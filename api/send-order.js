@@ -92,30 +92,30 @@ export default async function handler(req, res) {
     const html = orderHtml(body);
 
     // ส่งเข้าร้าน (แอดมิน)
-    const adminMail = await transporter.sendMail({
-      from: FROM,
-      to: SHOP,
-      replyTo: email || undefined,  // กด Reply แล้วยิงกลับหาลูกค้า
-      subject: `ออเดอร์ใหม่ | ${body.orderId || "-"}`,
-      html,
-      attachments,
-    });
+await transporter.sendMail({
+  from: FROM,                 // ต้องเป็นอีเมลเดียวกับ SMTP_USER
+  to: SHOP,                   // ร้าน/แอดมิน (SHOP_EMAIL/TO_EMAIL/หรือ FROM)
+  replyTo: email || FROM,     // กด Reply แล้วเด้งหาลูกค้า
+  subject: `ออเดอร์ใหม่ | ${body.orderId || "-"}`,
+  html,                       // ใช้ HTML สรุปออเดอร์ที่คุณประกอบไว้ด้านบน
+  attachments,
+});
 
-    // ส่งสำเนาให้ลูกค้า (ถ้าใส่อีเมล)
-    if (email) {
-      await transporter.sendMail({
-        from: FROM,
-        to: email,
-        subject: `ยืนยันคำสั่งซื้อของคุณ | ${body.orderId || "-"}`,
-        html: `
-          <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
-            <p>ขอบคุณ ${name || ""} สำหรับการสั่งซื้อ 🙏</p>
-            ${html}
-          </div>
-        `,
-        attachments,
-      });
-    }
+// ส่งสำเนาให้ลูกค้า (ถ้าใส่อีเมล)
+if (email) {
+  await transporter.sendMail({
+    from: FROM,
+    to: email,
+    subject: `ยืนยันคำสั่งซื้อของคุณ | ${body.orderId || "-"}`,
+    html: `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+        <p>ขอบคุณ ${name || ""} สำหรับการสั่งซื้อ 🙏</p>
+        ${html}
+      </div>
+    `,
+    attachments,
+  });
+}
 
     return res.status(200).json({
       ok: true,
